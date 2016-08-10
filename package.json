@@ -1,6 +1,6 @@
 {
   "name": "babel-plugin-module-alias-rn",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "main": "lib/index.js",
   "description": "Babel plugin to rewrite the path in require() and ES6 import",
   "repository": {
