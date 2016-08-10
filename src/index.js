@@ -4,14 +4,52 @@ const fs = require('fs');
 
 const dirContentsMap = {};
 
+function getStateOptions(s) {
+  if (s.opts) {
+    if (Array.isArray(s.opts)) {
+      return { map: s.opts };
+    } else if (!s.opts.map && s.opts.expose) {
+      return { map: [s.opts] };
+    }
+
+    return s.opts;
+  }
+
+  return {};
+}
+
+function getRootPath(s) {
+  if (s.root) {
+    return s.root;
+  } else if (s.opts) {
+    return s.opts.root || '';
+  }
+
+  return '';
+}
+
 function createFilesMap(state) {
   const result = {};
-  const opts = Array.isArray(state.opts)
-    ? state.opts
-    : [state.opts];
+  const opts = getStateOptions(state);
+  const rootPath = getRootPath(opts);
+  const map = opts.map;
 
-  opts.forEach(moduleMapData => {
-    result[moduleMapData.expose] = moduleMapData.src;
+  map.forEach(m => {
+    const expose = m.expose || undefined;
+    const src = m.src || undefined;
+
+    if (expose) {
+      if (typeof src === 'string') {
+        if (!src) {
+          // Consider non existing paths as referencing to the root path
+          return rootPath;
+        }
+
+        result[expose] = path.join(rootPath, src);
+      }
+    }
+
+    return null;
   });
 
   return result;
@@ -26,7 +64,10 @@ function toPosixPath(modulePath) {
   return modulePath.replace(/\\/g, '/');
 }
 
-function pathFix(os, base, fileList) {
+function toReactPath(base, fileList, o) {
+  // TODO: Check if the current file is a directory, if it is check the logic on index.js
+  const os = (o || process.env.TARGET_PLATFORM || '').toLowerCase();
+
   // throw new Error(`${os} | ${base} | ${fileList}`);
   // Check for mobile substitutions first
   if (['mobile', 'ios', 'android', 'windows'].indexOf(os) > -1) {
@@ -41,7 +82,7 @@ function pathFix(os, base, fileList) {
     }
 
     // Fallback on normal file (web/desktop) for passthrow files
-    return pathFix('desktop', base, fileList);
+    return toReactPath(base, fileList, 'desktop');
   } else if (os === 'desktop') {
     // Check for desktop only files
     if (fileList.indexOf(`${base}.desktop.js`) > -1) {
@@ -49,7 +90,7 @@ function pathFix(os, base, fileList) {
     }
 
     // Fallback on web
-    return pathFix('web', base, fileList);
+    return toReactPath(base, fileList, 'web');
   } else if (os === 'web') {
     if (fileList.indexOf(`${base}.web.js`) > -1) {
       return `${base}.web`;
@@ -64,11 +105,29 @@ function pathFix(os, base, fileList) {
   return base;
 }
 
-export function mapToRelative(currentFile, module, supportReactNative) {
+export function mapForReact(moduleMapped) {
+  // moduleMapped =
+  const base = path.dirname(moduleMapped);
+
+  // Index files in destination directory once
+  if (!dirContentsMap[base]) {
+    dirContentsMap[base] = fs.readdirSync(base).map(v => v.toLowerCase());
+  }
+
+  // Fix mapped module path
+  const newFile = toReactPath(
+    path.basename(moduleMapped),
+    dirContentsMap[base]
+  );
+
+  return `${base}/${newFile}`;
+}
+
+export function mapToRelative(currentFile, module, options) {
+  const o = options || {};
+  const reactOsFileInfer = !!o.react;
   let from = path.dirname(currentFile);
   let to = path.normalize(module);
-
-  const osENV = (process.env.REACT_NATIVE_ENV || '').toLowerCase();
 
   from = resolve(from);
   to = resolve(to);
@@ -86,51 +145,66 @@ export function mapToRelative(currentFile, module, supportReactNative) {
   if (moduleMapped[0] !== '.') moduleMapped = `./${moduleMapped}`;
 
   // Support React-Native specific require rewrites
-  if (process.env.REACT_NATIVE && supportReactNative) {
-    const base = path.dirname(moduleMapped);
-
-    // Index files in destination directory once
-    if (!dirContentsMap[base]) {
-      dirContentsMap[base] = fs.readdirSync(base).map(v => v.toLowerCase());
-    }
-
-    // Fix mapped module path
-    const newFile = pathFix(
-      osENV, path.basename(moduleMapped, 'js'),
-      dirContentsMap[base]
-    );
-
-    return `${base}/${newFile}`;
+  if (reactOsFileInfer) {
+    return mapForReact(moduleMapped);
   }
-  // }
 
   return moduleMapped;
 }
 
-export function mapModule(source, file, filesMap) {
-  let supportReactNative = false;
-  let s = source;
+export function asAbsolute(currentFile, module, options) {
+  const reactOsFileInfer = !!options.react;
+  let m = module || options.root;
 
-  // Allow React-Native automatic file detection when applies
-  if (process.env.REACT_NATIVE) {
-    const aux = source.toLowerCase().indexOf('autoimport:');
-
-    if (aux > -1) {
-      s = source.slice(supportReactNative + 11);
-      supportReactNative = true;
-    }
+  if (!path.isAbsolute(m)) {
+    m = path.join(options.root, m);
   }
 
-  const moduleSplit = s.split('/');
+  // throw new Error(`${JSON.stringify(options, null, 2)}`);
+
+  if (reactOsFileInfer) {
+    return mapForReact(m);
+  }
+
+  return m;
+}
+
+export function mapModule(source, file, filesMap, state) {
+  const moduleSplit = source.split('/');
+  const opts = getStateOptions(state);
+  const absolutePaths = !!getRootPath(opts);
 
   let src;
   while (moduleSplit.length) {
     const m = moduleSplit.join('/');
+
     if ({}.hasOwnProperty.call(filesMap, m)) {
       src = filesMap[m];
       break;
     }
+
     moduleSplit.pop();
+  }
+
+  if (absolutePaths) {
+    if (!src && source[0] !== '.') {
+      // Do not break node_modules required by name
+      return null;
+    }
+
+    if (path.isAbsolute(source)) {
+      // After the node is replaced the visitor will be called again.
+      // Without this condition these functions will generate a circular loop.
+      return null;
+    }
+
+    return asAbsolute(
+      file,
+      moduleSplit.length ?
+        source.replace(moduleSplit.join('/'), src) :
+        path.join(opts.root, source),
+      opts
+    );
   }
 
   if (!moduleSplit.length) {
@@ -138,8 +212,11 @@ export function mapModule(source, file, filesMap) {
     return null;
   }
 
-  const newPath = s.replace(moduleSplit.join('/'), src);
-  return mapToRelative(file, newPath, supportReactNative);
+  return mapToRelative(
+    file,
+    source.replace(moduleSplit.join('/'), src),
+    opts
+  );
 }
 
 
@@ -158,7 +235,8 @@ export default ({ types: t }) => {
     const moduleArg = nodePath.node.arguments[0];
     if (moduleArg && moduleArg.type === 'StringLiteral') {
       const filesMap = createFilesMap(state);
-      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap);
+
+      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap, state);
       if (modulePath) {
         nodePath.replaceWith(t.callExpression(
           nodePath.node.callee, [t.stringLiteral(modulePath)]
@@ -171,7 +249,8 @@ export default ({ types: t }) => {
     const moduleArg = nodePath.node.source;
     if (moduleArg && moduleArg.type === 'StringLiteral') {
       const filesMap = createFilesMap(state);
-      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap);
+
+      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap, state);
       if (modulePath) {
         nodePath.replaceWith(t.importDeclaration(
           nodePath.node.specifiers,
