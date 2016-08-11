@@ -3,6 +3,19 @@ const path = require('path');
 const fs = require('fs');
 
 const dirContentsMap = {};
+const regExpMap = {
+  react: {
+    regexp: new RegExp('auto:', 'g'),
+    replace: './'
+  },
+  npm: {
+    regexp: new RegExp('npm:', 'g'),
+    replace: ''
+  }
+};
+
+let lastIn;
+let lastOut;
 
 function getStateOptions(s) {
   if (s.opts) {
@@ -18,21 +31,23 @@ function getStateOptions(s) {
   return {};
 }
 
-function getRootPath(s) {
-  if (s.root) {
-    return s.root;
-  } else if (s.opts) {
-    return s.opts.root || '';
-  }
-
-  return '';
+function getRootPath(o) {
+  // throw `IGNORE_ABSOLUTE: ${process.env.IGNORE_ABSOLUTE} | root: ${o.root} | ${JSON.stringify(o, null, 2)} | abs: ${path.isAbsolute(o.root || '')}`;
+  return !process.env.IGNORE_ABSOLUTE && o.root ? o.root : '';
 }
 
-function createFilesMap(state) {
-  const result = {};
-  const opts = getStateOptions(state);
-  const rootPath = getRootPath(opts);
-  const map = opts.map;
+function reactOsFileInfer(s) {
+  return s && s.react;
+}
+
+function escapeRegExp(str) {
+  return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, '\\$&');
+}
+
+function createFilesMap(options) {
+  const keys = [];
+  const contents = {};
+  const map = options.map || [];
 
   map.forEach(m => {
     const expose = m.expose || undefined;
@@ -40,19 +55,19 @@ function createFilesMap(state) {
 
     if (expose) {
       if (typeof src === 'string') {
-        if (!src) {
-          // Consider non existing paths as referencing to the root path
-          return rootPath;
-        }
-
-        result[expose] = path.join(rootPath, src);
+        // throw `root ${rootPath} | src: ${src}`;
+        keys.push(expose);
+        contents[expose] = {
+          regexp: new RegExp(escapeRegExp(expose), 'g'),
+          value: src
+        };
       }
     }
 
     return null;
   });
 
-  return result;
+  return { keys, contents };
 }
 
 function resolve(filename) {
@@ -123,102 +138,169 @@ export function mapForReact(moduleMapped) {
   return `${base}/${newFile}`;
 }
 
-export function mapToRelative(currentFile, module, options) {
-  const o = options || {};
-  const reactOsFileInfer = !!o.react;
-  let from = path.dirname(currentFile);
-  let to = path.normalize(module);
+function determineContext(fileName, options) {
+  const fileData = {
+    file: '',
+    react: false,
+    npm: false
+  };
 
-  from = resolve(from);
-  to = resolve(to);
+  let arg = fileName;
 
-  let moduleMapped = path.relative(from, to);
 
-  moduleMapped = toPosixPath(moduleMapped);
+  Object.keys(regExpMap).forEach(k => {
+    if (arg.search(regExpMap[k].regexp) > -1) {
+      arg = arg.replace(regExpMap[k].regexp, regExpMap[k].replace);
 
-  // Support npm modules instead of directories
-  if (moduleMapped.indexOf('npm:') !== -1) {
-    const [, npmModuleName] = moduleMapped.split('npm:');
-    return npmModuleName;
+      if (arg === 'unknown') {
+        arg = '';
+      } else {
+        fileData[k] = true;
+      }
+    }
+  });
+
+  if (arg && arg !== 'unknown') {
+    fileData.file = arg;
   }
 
-  if (moduleMapped[0] !== '.') moduleMapped = `./${moduleMapped}`;
+  fileData.react = fileData.react && options.react;
+  return fileData;
+}
+
+// Rewrite module path relativelly
+export function mapToRelative(moduleFile, constantModulePart, options) {
+  const from = resolve(path.dirname(constantModulePart));
+  const to = resolve(path.normalize(moduleFile));
+  const moduleMapped = toPosixPath(path.relative(from, to));
 
   // Support React-Native specific require rewrites
-  if (reactOsFileInfer) {
+  if (reactOsFileInfer(options)) {
     return mapForReact(moduleMapped);
   }
 
   return moduleMapped;
 }
 
-export function asAbsolute(currentFile, module, options) {
-  const reactOsFileInfer = !!options.react;
-  let m = module || options.root;
+// Adapts a module path to the context of caller
+function adaptModulePath(modulePath, state) {
+  // const fileName = state.file.opts.filename;
+  const options = getStateOptions(state);
+  const filesMap = createFilesMap(options);
+  const rootPath = getRootPath(options);
 
-  if (!path.isAbsolute(m)) {
-    m = path.join(options.root, m);
-  }
+  let module = determineContext(modulePath, options);
 
-  // throw new Error(`${JSON.stringify(options, null, 2)}`);
-
-  if (reactOsFileInfer) {
-    return mapForReact(m);
-  }
-
-  return m;
-}
-
-export function mapModule(source, file, filesMap, state) {
-  const moduleSplit = source.split('/');
-  const opts = getStateOptions(state);
-  const absolutePaths = !!getRootPath(opts);
-
-  let src;
-  while (moduleSplit.length) {
-    const m = moduleSplit.join('/');
-
-    if ({}.hasOwnProperty.call(filesMap, m)) {
-      src = filesMap[m];
-      break;
-    }
-
-    moduleSplit.pop();
-  }
-
-  if (absolutePaths) {
-    if (!src && source[0] !== '.') {
-      // Do not break node_modules required by name
-      return null;
-    }
-
-    if (path.isAbsolute(source)) {
-      // After the node is replaced the visitor will be called again.
-      // Without this condition these functions will generate a circular loop.
-      return null;
-    }
-
-    return asAbsolute(
-      file,
-      moduleSplit.length ?
-        source.replace(moduleSplit.join('/'), src) :
-        path.join(opts.root, source),
-      opts
-    );
-  }
-
-  if (!moduleSplit.length) {
-    // no mapping available
+  // Do not generate infinite cyrcular references on empty nodes
+  if (!module.file) {
     return null;
   }
 
-  return mapToRelative(
-    file,
-    source.replace(moduleSplit.join('/'), src),
-    opts
-  );
+  // Safeguard against circular calls
+  if (lastIn === lastOut) {
+    return null;
+  }
+
+  // Remove relative path prefix before replace
+  const absoluteModule = path.isAbsolute(module.file);
+
+  // Try to replace aliased module
+  let found = false;
+  let constantModulePart;
+  filesMap.keys.filter((k) => {
+    const d = filesMap.contents[k];
+    const idx = module.file.search(d.regexp);
+
+    if (!found && idx > -1) {
+      // throw `Found ${d} in ${module.file}`
+      constantModulePart = module.file.slice(0, idx);
+
+      // Replace the alias with it's path and continue
+      module.file = module.file.replace(d.regexp, d.value);
+      found = true;
+
+      // Revaluate npm and react flags based on the new mapping
+      module = determineContext(module.file, options);
+
+      return true;
+    }
+
+    return false;
+  });
+
+  // Leave NPM modules as resolved, do not remap and ignore wrongfully formatted strings of form require('npm:')
+  if (module.npm) {
+    return module.file || null;
+  }
+
+  // Do not touch direct requires to npm modules (non annotated)
+  if (module.file.indexOf('./') !== 0 && module.file.indexOf('/') !== 0) {
+    return null;
+  }
+
+  // Check if any substitution took place
+  if (found) {
+    // Module alias substituted
+    if (!path.isAbsolute(module.file)) {
+      if (!absoluteModule && module.file[0] !== '.') {
+        // Add the relative notation back
+        module.file = `./${module.file}`;
+      }
+    }
+  }
+
+  // Do not break node_modules required by name
+  if (!found && module.file[0] !== '.') {
+    if (reactOsFileInfer(options)) {
+      const aux2 = mapForReact(module.file);
+
+      if (aux2 !== module.file) {
+        return aux2;
+      }
+    }
+
+    return null;
+  }
+
+  // Enforce absolute paths on absolute mode
+  if (rootPath) {
+    if (!path.isAbsolute(module.file)) {
+      module.file = path.join(rootPath, module.file);
+
+      if (reactOsFileInfer(options)) {
+        return mapForReact(module.file);
+      }
+
+      return module.file;
+    }
+
+    // After the node is replaced the visitor will be called again.
+    // Without this condition these functions will generate a circular loop.
+    return null;
+  }
+
+  // throw `Gets here: ${JSON.stringify(module.file)}`;
+
+  // Do not bother with relative paths that are not aliased
+  if (!found) {
+    return null;
+  }
+
+  let moduleMapped = mapToRelative(module.file, constantModulePart, options);
+  if (moduleMapped.indexOf('./') !== 0) {
+    moduleMapped = `./${moduleMapped}`;
+  }
+
+  return moduleMapped !== modulePath ? moduleMapped : null;
 }
 
+// Safeguard passthrow function remembers last input and generated output
+export function mapModule(modulePath, state) {
+  lastIn = modulePath;
+  lastOut = adaptModulePath(modulePath, state);
+
+  return lastOut;
+}
 
 export default ({ types: t }) => {
   function transformRequireCall(nodePath, state) {
@@ -234,9 +316,8 @@ export default ({ types: t }) => {
 
     const moduleArg = nodePath.node.arguments[0];
     if (moduleArg && moduleArg.type === 'StringLiteral') {
-      const filesMap = createFilesMap(state);
+      const modulePath = mapModule(moduleArg.value, state);
 
-      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap, state);
       if (modulePath) {
         nodePath.replaceWith(t.callExpression(
           nodePath.node.callee, [t.stringLiteral(modulePath)]
@@ -248,9 +329,8 @@ export default ({ types: t }) => {
   function transformImportCall(nodePath, state) {
     const moduleArg = nodePath.node.source;
     if (moduleArg && moduleArg.type === 'StringLiteral') {
-      const filesMap = createFilesMap(state);
+      const modulePath = mapModule(moduleArg.value, state);
 
-      const modulePath = mapModule(moduleArg.value, state.file.opts.filename, filesMap, state);
       if (modulePath) {
         nodePath.replaceWith(t.importDeclaration(
           nodePath.node.specifiers,
