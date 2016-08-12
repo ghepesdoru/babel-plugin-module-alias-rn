@@ -22,6 +22,10 @@ describe('Babel plugin module alias', () => {
           }, {
             src: './test/mock',
             expose: 'mock'
+          },
+          {
+            src: './.config',
+            expose: 'config'
           }
         ]
       ]
@@ -70,6 +74,10 @@ describe('Babel plugin module alias', () => {
           }, {
             src: './test/mock',
             expose: 'mock'
+          },
+          {
+            src: './.config',
+            expose: 'config'
           }
         ]
       }]
@@ -720,7 +728,7 @@ describe('Babel plugin module alias', () => {
     });
   });
 
-  describe('With IGNORE_ABSOLUTE flag', () => {
+  describe('with IGNORE_ABSOLUTE flag', () => {
     let result;
 
     describe('with an require statement', () => {
@@ -738,6 +746,60 @@ describe('Babel plugin module alias', () => {
         process.env.IGNORE_ABSOLUTE = true;
         result = transform('import { concrete } from "auto:mock/fallback";', transformerOptsAbsoluteReact);
         assert.strictEqual(result.code, 'import { concrete } from "./test/mock/fallback";');
+      });
+    });
+  });
+
+  describe('with weird file names', () => {
+    let result;
+
+    delete process.env.IGNORE_ABSOLUTE;
+    delete process.env.TARGET_PLATFORM;
+
+    describe('with a require statement :: relative', () => {
+      it('Maps well the import for ./webpack.dev.config.js :: relative', () => {
+        result = transform('var config = require("./webpack.dev.config.js");', transformerOpts);
+        assert.strictEqual(result.code, 'var config = require("./webpack.dev.config.js");');
+      });
+
+      it('Maps well the import for config/webpack.dev.config.js :: relative', () => {
+        result = transform('var config = require("config/webpack.dev.config.js");', transformerOpts);
+        assert.strictEqual(result.code, 'var config = require("./.config/webpack.dev.config.js");');
+      });
+
+      it('Maps well the import for ./test/config/webpack.dev.config.js :: relative', () => {
+        result = transform('var config = require("./test/config/webpack.dev.config.js");', transformerOpts);
+        assert.strictEqual(result.code, 'var config = require("./test/.config/webpack.dev.config.js");');
+      });
+
+      it('Maps well the import for ./test/webpack.dev.config/config :: relative', () => {
+        result = transform('var config = require("./test/webpack.dev.config/config");', transformerOpts);
+        assert.strictEqual(result.code, 'var config = require("./test/webpack.dev.config/.config");');
+      });
+    });
+
+    describe('with a require statement :: absolute', () => {
+      delete process.env.IGNORE_ABSOLUTE;
+      delete process.env.TARGET_PLATFORM;
+
+      it('Maps well the import for ./webpack.dev.config.js :: absolute', () => {
+        result = transform('var config = require("./webpack.dev.config.js");', transformerOptsAbsolute);
+        assert.strictEqual(result.code, `var config = require("${PROJECT_ROOT}/webpack.dev.config.js");`);
+      });
+
+      it('Maps well the import for config/webpack.dev.config.js :: absolute', () => {
+        result = transform('var config = require("config/webpack.dev.config.js");', transformerOptsAbsolute);
+        assert.strictEqual(result.code, `var config = require("${PROJECT_ROOT}/.config/webpack.dev.config.js");`);
+      });
+
+      it('Maps well the import for ./test/config/webpack.dev.config.js :: absolute', () => {
+        result = transform('var config = require("./test/config/webpack.dev.config.js");', transformerOptsAbsolute);
+        assert.strictEqual(result.code, `var config = require("${PROJECT_ROOT}/test/.config/webpack.dev.config.js");`);
+      });
+
+      it('Maps well the import for ./test/webpack.dev.config/config :: absolute', () => {
+        result = transform('var config = require("./test/webpack.dev.config/config");', transformerOptsAbsolute);
+        assert.strictEqual(result.code, `var config = require("${PROJECT_ROOT}/test/webpack.dev.config/.config");`);
       });
     });
   });

@@ -56,9 +56,14 @@ function createFilesMap(options) {
     if (expose) {
       if (typeof src === 'string') {
         // throw `root ${rootPath} | src: ${src}`;
+        // (^config[\/]+|[\/]+config$|[\/]+config[\/]+)
+
+        const escapedExpose = escapeRegExp(expose);
+
         keys.push(expose);
         contents[expose] = {
-          regexp: new RegExp(escapeRegExp(expose), 'g'),
+          expose,
+          regexp: new RegExp(`(^${escapedExpose}$)|(^${escapedExpose}[\/]+)|([\/]+${escapedExpose}[\/]+)|([\/]+${escapedExpose})`),
           value: src
         };
       }
@@ -174,6 +179,15 @@ export function mapToRelative(moduleFile, constantModulePart, options) {
   const to = resolve(path.normalize(moduleFile));
   const moduleMapped = toPosixPath(path.relative(from, to));
 
+  // throw JSON.stringify({
+  //   from,
+  //   to,
+  //   moduleMapped,
+  //   moduleFile,
+  //   constantModulePart,
+  //   options
+  // }, null, 2);
+
   // Support React-Native specific require rewrites
   if (reactOsFileInfer(options)) {
     return mapForReact(moduleMapped);
@@ -209,15 +223,24 @@ function adaptModulePath(modulePath, state) {
   let constantModulePart;
   filesMap.keys.filter((k) => {
     const d = filesMap.contents[k];
-    const idx = module.file.search(d.regexp);
+    let idx = module.file.search(d.regexp);
 
     if (!found && idx > -1) {
       // throw `Found ${d} in ${module.file}`
-      constantModulePart = module.file.slice(0, idx);
+      // constantModulePart = module.file.slice(0, idx) || './';
+      constantModulePart = './';
+
+      if (module.file[idx] === '/') {
+        idx += 1;
+      }
+
+      const value = d.value[0] === '.' && idx > 0 ? d.value.slice(2) : d.value;
+      // const value = d.value;
 
       // Replace the alias with it's path and continue
-      module.file = module.file.replace(d.regexp, d.value);
+      module.file = `${module.file.slice(0, idx) || ''}${value}${module.file.slice(idx + d.expose.length) || ''}`;
       found = true;
+
 
       // Revaluate npm and react flags based on the new mapping
       module = determineContext(module.file, options);
@@ -291,15 +314,23 @@ function adaptModulePath(modulePath, state) {
     moduleMapped = `./${moduleMapped}`;
   }
 
+  // throw JSON.stringify({
+  //   moduleMapped, modulePath, module, constantModulePart
+  // }, null, 2);
   return moduleMapped !== modulePath ? moduleMapped : null;
 }
 
 // Safeguard passthrow function remembers last input and generated output
 export function mapModule(modulePath, state) {
-  lastIn = modulePath;
-  lastOut = adaptModulePath(modulePath, state);
+  lastIn = `${modulePath}${JSON.stringify(state)}${process.env.IGNORE_ABSOLUTE}`;
+  const out = adaptModulePath(modulePath, state);
+  lastOut = `${out}${JSON.stringify(state)}${process.env.IGNORE_ABSOLUTE}`;
 
-  return lastOut;
+  // if (out === './test/webpack.dev.config/.config') {
+  //   throw `called again`
+  // }
+
+  return out;
 }
 
 export default ({ types: t }) => {
