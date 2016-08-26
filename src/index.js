@@ -33,7 +33,7 @@ function getStateOptions(s) {
 
 function getRootPath(o) {
   // throw `IGNORE_ABSOLUTE: ${process.env.IGNORE_ABSOLUTE} | root: ${o.root} | ${JSON.stringify(o, null, 2)} | abs: ${path.isAbsolute(o.root || '')}`;
-  const root = o.root === './' ? path.resolve(__dirname, '..') : o.root;
+  const root = o.root === './' ? path.resolve(o.root) : o.root;
   return !process.env.IGNORE_ABSOLUTE && root ? root : '';
 }
 
